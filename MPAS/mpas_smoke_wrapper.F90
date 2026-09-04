@@ -12,6 +12,7 @@ module mpas_smoke_wrapper
    use mpas_smoke_init 
    use module_plumerise,      only : ebu_driver
    use module_fire_emissions
+   use module_anthro_emissions
    use module_add_emiss_burn, only : add_emis_burn
    use dep_dry_simple_mod,    only : dry_dep_driver_simple
    use dep_dry_mod_emerson,   only : dry_dep_driver_emerson, particle_settling_wrapper
@@ -32,6 +33,7 @@ module mpas_smoke_wrapper
    use module_hab_emissions,  only : hab_bacteria_driver
    use module_lightning_driver
    use module_simple_soa, only : simple_soa, simple_soa_voc
+   use module_mp_aero_emissions
 
    implicit none
 
@@ -167,6 +169,7 @@ contains
            mavail                , g                     , vegfra               ,            &
            landusef              , cldfrac               , ktop_deep            ,            &
            refl10cm              ,                                                           &
+           nwfa2d                , nifa2d                , config_mp_aero_emission  ,        &
            cp                    , rd                    , gmt                  ,            &
            ids       , ide       , jds       , jde       , kds       , kde      ,            &
            ims       , ime       , jms       , jme       , kms       , kme      ,            &
@@ -211,6 +214,7 @@ contains
     real(RKIND),intent(in), dimension(ims:ime, jms:jme)            :: coszen
     real(RKIND),intent(in), dimension(ims:ime, jms:jme)            :: raincv, rainncv, mavail                    
     real(RKIND),intent(inout), dimension(ims:ime, jms:jme)         :: rmol, ust
+    real(RKIND),intent(inout), dimension(ims:ime, jms:jme),optional :: nwfa2d, nifa2d
 ! 2D Fire Input
     real(RKIND),intent(in), dimension(ims:ime, jms:jme), optional      :: totprcp_prev24, fire_end_hr,fmc_avg,     &
                                                                           efs_smold, efs_flam, efs_rsmold
@@ -389,6 +393,7 @@ contains
      integer, intent(in)                :: lightning_cellcount_method
      real(kind=RKIND), intent(in)       :: lightning_cldtop_adjustment
      character(len=*), intent(in)       :: config_convection_scheme, config_microp_scheme 
+     logical,intent(in)                 :: config_mp_aero_emission
 
 !----------------------------------
 !>-- Local Variables
@@ -455,6 +460,8 @@ contains
     real(RKIND) :: mie_interval_secs
 !=============================================================
 
+    real(RKIND), dimension(ims:ime, jms:jme):: em_dust, em_fire_oc, em_antho_oc, em_seas
+
     errmsg = ''
     errflg = 0
  
@@ -511,6 +518,13 @@ contains
      endif
    endif
 !
+
+    e_ss_out    = 0._RKIND
+    em_dust     = 0._RKIND
+    em_seas     = 0._RKIND
+    em_fire_oc  = 0._RKIND
+    em_antho_oc = 0._RKIND
+
     uspdavg2d   = 0._RKIND
     windgustpot = 0._RKIND
     hpbl2d      = 0._RKIND
@@ -786,6 +800,7 @@ contains
 
   ! -- add sea salt emissions
   if (do_mpas_ssalt) then
+   ! if (config_mp_aero_emission) then
     if  (do_timing) call mpas_timer_start('seasalt_driver')
      call gocart_seasalt_driver (                                     &
              dt,rri,t_phy,u_phy,v_phy,                                &
@@ -799,7 +814,7 @@ contains
              ims,ime, jms,jme, kms,kme,                               &
              its,ite, jts,jte, kts,kte                                )
     if  (do_timing) call mpas_timer_stop('seasalt_driver')
-    endif
+  endif
 
   ! -- add sea salt emissions
   if (do_mpas_hab) then
@@ -1111,7 +1126,27 @@ contains
                               messageType=MPAS_LOG_WARN)
        end select
        if (do_timing) call mpas_timer_stop('soa_driver')
-    
+    endif 
+
+    if (config_mp_aero_emission .and. present(nwfa2d) .and. present(nifa2d)) then
+
+    do j=jts,jte
+    do i=its,ite
+      em_dust     (i,j)=e_dust_out(i,kts,j,index_e_dust_out_dust_fine )*0.05     ! ug/m2/s
+      em_seas     (i,j)=e_ss_out  (i,kts,j,index_e_ss_out_ssalt_fine  )          ! ug/m2/s
+      em_fire_oc  (i,j)=e_bb_out  (i,kts,j,index_e_bb_out_smoke_fine  )          ! ug/m2/s
+      em_antho_oc (i,j)=e_ant_out (i,kts,j,index_e_ant_out_unspc_fine )          ! ug/m2/s
+      em_antho_oc (i,j)=min(em_antho_oc (i,j)*0.2*0.05,0.002)
+      em_fire_oc  (i,j)=min(em_fire_oc  (i,j)*0.01,0.05)
+      em_seas     (i,j)=em_seas     (i,j)*0.05
+    enddo
+    enddo
+
+      call  mp_aero_emission(em_dust,em_fire_oc,em_antho_oc,em_seas,        &
+            dt, xland, nwfa2d, nifa2d, rri, dz8w,                           &
+            ids,ide, jds,jde, kds,kde,                                      &
+            ims,ime, jms,jme, kms,kme,                                      &
+            its,ite, jts,jte, kts,kte                                       )
     endif
     
  end subroutine mpas_smoke_driver
@@ -1386,6 +1421,5 @@ contains
    
 
   end subroutine mpas_smoke_prep
-
 !> @}
   end module mpas_smoke_wrapper

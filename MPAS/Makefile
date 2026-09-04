@@ -18,6 +18,7 @@ OBJS = \
 	module_zero_plumegen_coms.o \
 	module_smoke_plumerise.o \
 	module_add_emiss_burn.o \
+	module_anthro_emissions.o \
 	module_plumerise.o \
 	dust_data_mod.o \
 	dust_fengsha_mod.o \
@@ -41,7 +42,8 @@ OBJS = \
         module_ltng_iccg.o \
         module_ltng_lpi.o \
         module_lightning_driver.o \
-	module_simple_soa.o
+	module_simple_soa.o \
+	module_mp_aero_emissions.o
    
 
 MPAS_SMOKE: $(OBJS)
@@ -140,7 +142,8 @@ mpas_smoke_wrapper.o:      \
         dep_dry_mod_wesley.o \
         module_hab_emissions.o \
         module_lightning_driver.o \
-	module_simple_soa.o
+	module_simple_soa.o \
+	module_mp_aero_emissions.o
 
 module_zero_plumegen_coms.o: \
         mpas_smoke_config.o
@@ -199,6 +202,8 @@ module_simple_soa.o: \
 	mpas_smoke_config.o \
 	mpas_smoke_init.o
 
+
+module_mp_aero_emissions.o:
 
 #module_smoke_plumerise.o: module_smoke_plumerise.F90
 #	$(FC) $(CPPFLAGS) $(COREDEF) $(FFLAGS) -c module_smoke_plumerise.F90 $(CPPINCLUDES) $(FCINCLUDES) -I.. -I../../../framework -I../../../external/esmf_time_f90
