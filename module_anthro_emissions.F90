@@ -80,7 +80,6 @@ contains
 
    REAL(RKIND), PARAMETER :: rwc_t_thresh = 283.15 ! [ 50 F]
 
-!
    do j = jts,jte
    do k = kts, kemit
    do i = its,ite

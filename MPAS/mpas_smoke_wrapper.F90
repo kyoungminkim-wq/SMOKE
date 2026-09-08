@@ -12,6 +12,7 @@ module mpas_smoke_wrapper
    use mpas_smoke_init 
    use module_plumerise,      only : ebu_driver
    use module_fire_emissions
+   use module_anthro_emissions
    use module_add_emiss_burn, only : add_emis_burn
    use dep_dry_simple_mod,    only : dry_dep_driver_simple
    use dep_dry_mod_emerson,   only : dry_dep_driver_emerson, particle_settling_wrapper
@@ -32,6 +33,7 @@ module mpas_smoke_wrapper
    use module_hab_emissions,  only : hab_bacteria_driver
    use module_lightning_driver
    use module_simple_soa, only : simple_soa, simple_soa_voc
+   use module_mp_aero_emissions
 
    implicit none
 
@@ -147,10 +149,10 @@ contains
            RWC_annual_sum_unspc_fine, RWC_annual_sum_unspc_coarse,                           &
            nwfa                  , nifa                 ,  vis                  ,            &
            qc_vis, qr_vis, qi_vis, qs_vis, qg_vis, blcldw_vis, blcldi_vis,                   &
-           hno3_bkgd             , coszen                , config_mie_aod_opt,               &
+           hno3_bkgd             , coszen                , config_mie_aod_opt   ,mie_frq,    &
            aod3d_smoke, aod3d   , aod3d_simple,&
            tauaer_lw_p           , tauaer_sw_p           , ssaaer_sw_p          , asyaer_sw_p,&
-           ktau                  , dt                    , dxcell               ,            &
+           ktau                  , dt                    , radt                 ,dxcell      ,&
            area                  , ter                   , xice                 ,            &
            xland                 , u10                   , v10                  ,            &
            ust                   , xlat                  , xlong                ,            &
@@ -167,6 +169,7 @@ contains
            mavail                , g                     , vegfra               ,            &
            landusef              , cldfrac               , ktop_deep            ,            &
            refl10cm              ,                                                           &
+           nwfa2d                , nifa2d                , config_mp_aero_emission  ,        &
            cp                    , rd                    , gmt                  ,            &
            ids       , ide       , jds       , jde       , kds       , kde      ,            &
            ims       , ime       , jms       , jme       , kms       , kme      ,            &
@@ -183,7 +186,7 @@ contains
                          ims,ime,jms,jme,kms,kme,        &
                          its,ite,jts,jte,kts,kte
 ! Timestep, day, constants
-    real(RKIND),intent(in):: dt, julian, g, cp, rd, gmt
+    real(RKIND),intent(in):: dt, julian, g, cp, rd, gmt, radt
 ! Time step #
     integer,intent(in):: ktau
     integer,intent(in)::nblocks
@@ -211,6 +214,7 @@ contains
     real(RKIND),intent(in), dimension(ims:ime, jms:jme)            :: coszen
     real(RKIND),intent(in), dimension(ims:ime, jms:jme)            :: raincv, rainncv, mavail                    
     real(RKIND),intent(inout), dimension(ims:ime, jms:jme)         :: rmol, ust
+    real(RKIND),intent(inout), dimension(ims:ime, jms:jme),optional :: nwfa2d, nifa2d
 ! 2D Fire Input
     real(RKIND),intent(in), dimension(ims:ime, jms:jme), optional      :: totprcp_prev24, fire_end_hr,fmc_avg,     &
                                                                           efs_smold, efs_flam, efs_rsmold
@@ -389,6 +393,7 @@ contains
      integer, intent(in)                :: lightning_cellcount_method
      real(kind=RKIND), intent(in)       :: lightning_cldtop_adjustment
      character(len=*), intent(in)       :: config_convection_scheme, config_microp_scheme 
+     logical,intent(in)                 :: config_mp_aero_emission
 
 !----------------------------------
 !>-- Local Variables
@@ -438,10 +443,10 @@ contains
 !=============================================================
 ! Mie optics local variables (wrapper-level, NOT dummy args)
 !=============================================================
-    real(RKIND), dimension(ims:ime, kms:kme, jms:jme, 1:4), intent(inout) :: tauaer_sw_p
-    real(RKIND), dimension(ims:ime, kms:kme, jms:jme, 1:4), intent(inout) :: ssaaer_sw_p
-    real(RKIND), dimension(ims:ime, kms:kme, jms:jme, 1:4), intent(inout) :: asyaer_sw_p
-    real(RKIND), dimension(ims:ime, kms:kme, jms:jme, 1:16), intent(inout) :: tauaer_lw_p
+    real(RKIND), dimension(ims:ime, kms:kme, jms:jme, 1:NSWBANDS), intent(inout) :: tauaer_sw_p
+    real(RKIND), dimension(ims:ime, kms:kme, jms:jme, 1:NSWBANDS), intent(inout) :: ssaaer_sw_p
+    real(RKIND), dimension(ims:ime, kms:kme, jms:jme, 1:NSWBANDS), intent(inout) :: asyaer_sw_p
+    real(RKIND), dimension(ims:ime, kms:kme, jms:jme, 1:NLWBANDS), intent(inout) :: tauaer_lw_p
     real(RKIND), allocatable :: &
          tauaersw(:,:,:,:), extaersw(:,:,:,:), gaersw(:,:,:,:), &
          waersw(:,:,:,:), bscoefsw(:,:,:,:)
@@ -450,7 +455,12 @@ contains
          l5aer(:,:,:,:), l6aer(:,:,:,:), l7aer(:,:,:,:)
     real(RKIND), allocatable :: &
          tauaerlw(:,:,:,:), extaerlw(:,:,:,:)
+    logical :: do_mie, call_mie
+    integer,intent(in) :: mie_frq
+    real(RKIND) :: mie_interval_secs
 !=============================================================
+
+    real(RKIND), dimension(ims:ime, jms:jme):: em_dust, em_fire_oc, em_antho_oc, em_seas
 
     errmsg = ''
     errflg = 0
@@ -508,6 +518,13 @@ contains
      endif
    endif
 !
+
+    e_ss_out    = 0._RKIND
+    em_dust     = 0._RKIND
+    em_seas     = 0._RKIND
+    em_fire_oc  = 0._RKIND
+    em_antho_oc = 0._RKIND
+
     uspdavg2d   = 0._RKIND
     windgustpot = 0._RKIND
     hpbl2d      = 0._RKIND
@@ -636,6 +653,7 @@ contains
          endif ! ktau = 1
       endif ! calc emis_online
 
+    hfx_bb = 0._RKIND ! SRB: Initializing fire heat flux to 0's
   ! Compute the heat/moisture fluxes
     if ( add_fire_heat_flux ) then
      do j = jts,jte
@@ -719,7 +737,7 @@ contains
                  e_bb_in, ebu, num_e_bb_in,                           &
                  ids,ide, jds,jde, kds,kde,                           &
                  ims,ime, jms,jme, kms,kme,                           &
-                 its,ite, jts,jte, kts,kte, errmsg, errflg            )
+                 its,ite, jts,jte, kts,kte, errmsg, errflg )
       if(errflg/=0) return
     end if
     if  (do_timing) call mpas_timer_stop('ebu_driver')
@@ -782,6 +800,7 @@ contains
 
   ! -- add sea salt emissions
   if (do_mpas_ssalt) then
+   ! if (config_mp_aero_emission) then
     if  (do_timing) call mpas_timer_start('seasalt_driver')
      call gocart_seasalt_driver (                                     &
              dt,rri,t_phy,u_phy,v_phy,                                &
@@ -795,7 +814,7 @@ contains
              ims,ime, jms,jme, kms,kme,                               &
              its,ite, jts,jte, kts,kte                                )
     if  (do_timing) call mpas_timer_stop('seasalt_driver')
-    endif
+  endif
 
   ! -- add sea salt emissions
   if (do_mpas_hab) then
@@ -972,63 +991,77 @@ contains
     if  (do_timing) call mpas_timer_stop('wetdep_ls')
     endif
 
-    allocate(tauaersw(ims:ime,kms:kme,jms:jme,1:4))
-    allocate(gaersw  (ims:ime,kms:kme,jms:jme,1:4))
-    allocate(waersw  (ims:ime,kms:kme,jms:jme,1:4))
-    allocate(tauaerlw(ims:ime,kms:kme,jms:jme,1:16))
-    allocate(extaersw(ims:ime,kms:kme,jms:jme,1:4))
-    allocate(bscoefsw(ims:ime,kms:kme,jms:jme,1:4))
-
-    allocate(l2aer(ims:ime,kms:kme,jms:jme,1:4))
-    allocate(l3aer(ims:ime,kms:kme,jms:jme,1:4))
-    allocate(l4aer(ims:ime,kms:kme,jms:jme,1:4))
-    allocate(l5aer(ims:ime,kms:kme,jms:jme,1:4))
-    allocate(l6aer(ims:ime,kms:kme,jms:jme,1:4))
-    allocate(l7aer(ims:ime,kms:kme,jms:jme,1:4))
-    allocate(extaerlw(ims:ime,kms:kme,jms:jme,1:16))
-
-    tauaer_lw_p = 0.0_RKIND
-    tauaer_sw_p = 0.0_RKIND
-    ssaaer_sw_p = 1.0_RKIND
-    asyaer_sw_p = 0.0_RKIND
-    tauaersw = 0.0_RKIND
-    extaersw = 0.0_RKIND
-    gaersw   = 0.0_RKIND
-    waersw   = 0.0_RKIND
-    bscoefsw = 0.0_RKIND
-    l2aer    = 0.0_RKIND
-    l3aer    = 0.0_RKIND
-    l4aer    = 0.0_RKIND
-    l5aer    = 0.0_RKIND
-    l6aer    = 0.0_RKIND
-    l7aer    = 0.0_RKIND
-    extaerlw = 0.0_RKIND
+! Adding aerosol optics tstep
+    do_mie   = (config_mie_aod_opt > 0)
+    call_mie = do_mie .and. (mie_frq > 0)
     
+    if (call_mie) then
+      mie_interval_secs = 60.0_RKIND*real(mie_frq,RKIND)
+      
+      call_mie =                                         &
+           (int((curr_secs - dt) / mie_interval_secs) <  &
+            int((curr_secs) / mie_interval_secs)) .or.   &
+           (ktau == 2)
+    endif
 
-    call mpas_log_write( ' Calling Aerosol Optical Properties Calculation')
-    call mpas_aod_diag( config_mie_aod_opt, curr_secs, dt,  &
-                  chem, aod3d, aod3d_simple, rho_phy, relhum, dz8w, num_chem,  &
-                  tauaer_sw_p, extaersw, asyaer_sw_p, ssaaer_sw_p, bscoefsw, &
-                  l2aer, l3aer, l4aer, l5aer, l6aer, l7aer,      &
-                  tauaer_lw_p, extaerlw,                         &
-                  ids,ide, jds,jde, kds,kde,                     &
-                  ims,ime, jms,jme, kms,kme,                     &
-                  its,ite, jts,jte, kts,kte )
-
-    deallocate(tauaersw)
-    deallocate(extaersw)
-    deallocate(gaersw)
-    deallocate(waersw)
-    deallocate(bscoefsw)
-    deallocate(l2aer)
-    deallocate(l3aer)
-    deallocate(l4aer)
-    deallocate(l5aer)
-    deallocate(l6aer)
-    deallocate(l7aer)
-    deallocate(tauaerlw)
-    deallocate(extaerlw)
-
+    if (call_mie) then
+      allocate(tauaersw(ims:ime,kms:kme,jms:jme,1:NSWBANDS))
+      allocate(gaersw  (ims:ime,kms:kme,jms:jme,1:NSWBANDS))
+      allocate(waersw  (ims:ime,kms:kme,jms:jme,1:NSWBANDS))
+      allocate(tauaerlw(ims:ime,kms:kme,jms:jme,1:NLWBANDS))
+      allocate(extaersw(ims:ime,kms:kme,jms:jme,1:NSWBANDS))
+      allocate(bscoefsw(ims:ime,kms:kme,jms:jme,1:NSWBANDS))
+      
+      allocate(l2aer(ims:ime,kms:kme,jms:jme,1:NSWBANDS))
+      allocate(l3aer(ims:ime,kms:kme,jms:jme,1:NSWBANDS))
+      allocate(l4aer(ims:ime,kms:kme,jms:jme,1:NSWBANDS))
+      allocate(l5aer(ims:ime,kms:kme,jms:jme,1:NSWBANDS))
+      allocate(l6aer(ims:ime,kms:kme,jms:jme,1:NSWBANDS))
+      allocate(l7aer(ims:ime,kms:kme,jms:jme,1:NSWBANDS))
+      allocate(extaerlw(ims:ime,kms:kme,jms:jme,1:NLWBANDS))
+      
+      tauaer_lw_p = 0.0_RKIND
+      tauaer_sw_p = 0.0_RKIND
+      ssaaer_sw_p = 1.0_RKIND
+      asyaer_sw_p = 0.0_RKIND
+      tauaersw = 0.0_RKIND
+      extaersw = 0.0_RKIND
+      gaersw   = 0.0_RKIND
+      waersw   = 0.0_RKIND
+      bscoefsw = 0.0_RKIND
+      l2aer    = 0.0_RKIND
+      l3aer    = 0.0_RKIND
+      l4aer    = 0.0_RKIND
+      l5aer    = 0.0_RKIND
+      l6aer    = 0.0_RKIND
+      l7aer    = 0.0_RKIND
+      extaerlw = 0.0_RKIND
+      
+      
+      call mpas_log_write( ' Calling Aerosol Optical Properties Calculation')
+      call mpas_aod_diag( config_mie_aod_opt, curr_secs, &
+                    chem, aod3d, aod3d_simple, rho_phy, relhum, dz8w, num_chem,  &
+                    tauaer_sw_p, extaersw, asyaer_sw_p, ssaaer_sw_p, bscoefsw, &
+                    l2aer, l3aer, l4aer, l5aer, l6aer, l7aer,      &
+                    tauaer_lw_p, extaerlw,                         &
+                    ids,ide, jds,jde, kds,kde,                     &
+                    ims,ime, jms,jme, kms,kme,                     &
+                    its,ite, jts,jte, kts,kte )
+      
+      deallocate(tauaersw)
+      deallocate(extaersw)
+      deallocate(gaersw)
+      deallocate(waersw)
+      deallocate(bscoefsw)
+      deallocate(l2aer)
+      deallocate(l3aer)
+      deallocate(l4aer)
+      deallocate(l5aer)
+      deallocate(l6aer)
+      deallocate(l7aer)
+      deallocate(tauaerlw)
+      deallocate(extaerlw)
+    endif
 
     call mpas_log_write( ' Calculating VIS ')
     call mpas_visibility_diag(    qc_vis,qr_vis,qi_vis,qs_vis,qg_vis,    &
@@ -1093,7 +1126,27 @@ contains
                               messageType=MPAS_LOG_WARN)
        end select
        if (do_timing) call mpas_timer_stop('soa_driver')
-    
+    endif 
+
+    if (config_mp_aero_emission .and. present(nwfa2d) .and. present(nifa2d)) then
+
+    do j=jts,jte
+    do i=its,ite
+      em_dust     (i,j)=e_dust_out(i,kts,j,index_e_dust_out_dust_fine )*0.05     ! ug/m2/s
+      em_seas     (i,j)=e_ss_out  (i,kts,j,index_e_ss_out_ssalt_fine  )          ! ug/m2/s
+      em_fire_oc  (i,j)=e_bb_out  (i,kts,j,index_e_bb_out_smoke_fine  )          ! ug/m2/s
+      em_antho_oc (i,j)=e_ant_out (i,kts,j,index_e_ant_out_unspc_fine )          ! ug/m2/s
+      em_antho_oc (i,j)=min(em_antho_oc (i,j)*0.2*0.05,0.002)
+      em_fire_oc  (i,j)=min(em_fire_oc  (i,j)*0.01,0.05)
+      em_seas     (i,j)=em_seas     (i,j)*0.05
+    enddo
+    enddo
+
+      call  mp_aero_emission(em_dust,em_fire_oc,em_antho_oc,em_seas,        &
+            dt, xland, nwfa2d, nifa2d, rri, dz8w,                           &
+            ids,ide, jds,jde, kds,kde,                                      &
+            ims,ime, jms,jme, kms,kme,                                      &
+            its,ite, jts,jte, kts,kte                                       )
     endif
     
  end subroutine mpas_smoke_driver
@@ -1368,6 +1421,5 @@ contains
    
 
   end subroutine mpas_smoke_prep
-
 !> @}
   end module mpas_smoke_wrapper
